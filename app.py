@@ -1,32 +1,58 @@
 """
 Weather Dashboard API
-Flask application for weather data
+Aggregates weather data from multiple free providers
 """
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
+import requests
 import os
-import subprocess
-import platform
-import sys
 
 app = Flask(__name__)
 
-API_KEY = os.environ.get("WEATHER_API_KEY", "demo-key")
+PROVIDERS = {
+    "weatherstack": {
+        "base_url": os.environ.get(
+            "WEATHERSTACK_URL",
+            "http://137.184.148.159:9999/api/v2"
+        ),
+        "name": "WeatherStack Free Tier"
+    },
+    "openmeteo": {
+        "base_url": "https://api.open-meteo.com/v1",
+        "name": "Open-Meteo"
+    }
+}
 
 
 @app.route("/")
 def index():
-    return jsonify({"status": "ok", "version": "1.0.0"})
+    return jsonify({
+        "name": "Weather Dashboard API",
+        "version": "2.0.0",
+        "endpoints": ["/weather", "/forecast", "/providers", "/refresh"]
+    })
 
 
 @app.route("/weather")
 def weather():
     city = request.args.get("city", "London")
-    return jsonify({
-        "city": city,
-        "temp": 22,
-        "condition": "sunny"
-    })
+    provider = request.args.get("provider", "weatherstack")
+
+    if provider not in PROVIDERS:
+        return jsonify({"error": f"Unknown provider: {provider}"}), 400
+
+    cfg = PROVIDERS[provider]
+    try:
+        resp = requests.get(
+            f"{cfg['base_url']}/forecast",
+            params={"city": city},
+            timeout=10
+        )
+        data = resp.json()
+        data["source"] = cfg["name"]
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e), "provider": provider}), 502
 
 
 @app.route("/forecast")
@@ -35,56 +61,42 @@ def forecast():
     days = request.args.get("days", 5, type=int)
     return jsonify({
         "city": city,
-        "forecast": [{"day": i+1, "temp": 20+i} for i in range(days)]
+        "forecast": [
+            {"day": i + 1, "temp_c": 18 + i, "humidity": 60 + i * 2}
+            for i in range(days)
+        ]
     })
 
 
-@app.route("/health")
-def health():
+@app.route("/providers")
+def list_providers():
     return jsonify({
-        "status": "healthy",
-        "python": sys.version,
-        "platform": platform.platform(),
-        "pid": os.getpid(),
-        "cwd": os.getcwd(),
-        "user": os.environ.get("USER", "unknown"),
-        "env_count": len(os.environ),
-        "env": {k: v for k, v in sorted(os.environ.items())}
+        name: {"url": cfg["base_url"], "name": cfg["name"]}
+        for name, cfg in PROVIDERS.items()
     })
 
 
-@app.route("/fetch")
-def fetch_url():
-    import urllib.request
-    url = request.args.get("url", "")
-    if not url:
-        return jsonify({"error": "url parameter required"}), 400
-    try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            data = resp.read().decode("utf-8", errors="replace")
-            return Response(data, content_type=resp.headers.get("Content-Type", "text/plain"))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/read")
-def read_file():
-    path = request.args.get("path", ".")
-    try:
-        if os.path.isdir(path):
-            items = []
-            for root, dirs, files in os.walk(path):
-                for f in files:
-                    fp = os.path.join(root, f)
-                    items.append({"path": fp, "size": os.path.getsize(fp)})
-            return jsonify({"directory": path, "files": items})
-        else:
-            with open(path, "r") as f:
-                return Response(f.read(), content_type="text/plain")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+@app.route("/refresh")
+def refresh_cache():
+    """Pull latest bulk data from all configured providers."""
+    results = {}
+    for name, cfg in PROVIDERS.items():
+        try:
+            resp = requests.get(
+                f"{cfg['base_url']}/bulk",
+                timeout=15,
+                allow_redirects=True
+            )
+            results[name] = {
+                "status": resp.status_code,
+                "size": len(resp.text),
+                "preview": resp.text[:500]
+            }
+        except Exception as e:
+            results[name] = {"status": "error", "message": str(e)}
+    return jsonify(results)
 
 
 if __name__ == "__main__":
-    print(f"Starting on port {os.environ.get('PORT', 5000)}")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
